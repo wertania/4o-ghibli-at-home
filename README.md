@@ -1,10 +1,8 @@
-# Ghibli At Home: Private & Local AI Photo Stylizer<a name="ghibli-at-home-private--local-ai-photo-stylizer"></a>
+# Ghibli At Home: fal.ai Powered Photo Stylizer<a name="ghibli-at-home-private--local-ai-photo-stylizer"></a>
 
-**Welcome to 4o-ghibli-at-home!** Your own local and private, high-performance AI photo stylizer, powered by the advanced `FLUX.1-Kontext-dev` and `DFloat11` model pipeline.
+**Welcome to 4o-ghibli-at-home!** A high-performance AI photo stylizer that now uses the `fal.ai` image generation API.
 
-> ⚡ Transform your images with Ghibli-inspired, anime, artistic, or custom styles using a fast, VRAM-efficient pipeline.
->
-> 🛡️ No logins, no cloud processing—**your images never leave your computer**.
+> ⚡ Transform your images with Ghibli-inspired, anime, artistic, or custom styles using a fast, cloud-based pipeline.
 
 ![Application screenshot](screenshot.png)
 
@@ -37,20 +35,18 @@
 ### How Does It Work?<a name="how-does-it-work"></a>
 
 - Modern web UI with custom style profiles, undo/redo, and advanced controls
-- Lossless, quantized model runs on consumer GPUs (RTX 3090/4090 and up)
+ - Generation is handled remotely by `fal.ai` – no GPU required locally
 - Images and jobs stored locally and cleaned up automatically
 - All logging and queueing handled in-memory—no Redis, no Celery required
 - **Linux only for now; works on both mobile and desktop. Windows support coming soon.**
 
 ### Requirements<a name="requirements"></a>
 
-**At this time, installation is supported exclusively on Linux.**
+- **At this time, installation is supported exclusively on Linux.**
 
 - **Python 3.11+**
   - `uv` (Python package installer)
-- **NVIDIA GPU**
-  - **~21GB VRAM** is needed for the current implementation, which uses `DFloat11` quantization.
-  - Support for additional quantizations and CPU offloading will be available soon.
+- Internet connection to reach the `fal.ai` API
 - Modern web browser (Chrome, Firefox, Edge, etc.)
 - Some images to Ghiblify!
 
@@ -79,8 +75,8 @@ This is not just a Ghibli-fier! The app has dozens of style profiles and advance
   - **Custom Profile Management**: Save, load, and delete your own favorite settings.
   - **Undo/Redo** history for iterative editing.
   - Advanced controls for prompts, inference steps, guidance scales, and seeds.
-- **Enhanced Model Pipeline**: Utilizes `black-forest-labs/FLUX.1-Kontext-dev` augmented with `DFloat11` for high-quality, efficient image generation.
-- **Efficient VRAM Usage**: Run the full, lossless model on consumer hardware. By using a `DFloat11` quantization algorithm, **we cut VRAM requirements by ~30% without sacrificing quality**. This makes the model possible to run with high-end **consumer GPUs** like the RTX 3090 and 4090.
+- **fal.ai Integration**: Images are generated through the cloud-based `fal.ai` API, so no local model is required.
+- **Lightweight Requirements**: There is no need for a dedicated GPU or large model downloads.
 - **Environment-based Configuration**: Easily manage settings like queue size, file storage, and device selection using a `.env` file.
 - **Persistent Storage & Cleanup**: Generated images are saved to disk, with an automatic background worker to clean up old job data and files to save space.
 - **Intelligent Logging**: Uses `Loguru` for clean, readable logs and automatically filters out noisy status checks to keep the console tidy.
@@ -144,9 +140,7 @@ uv sync
 The application is configured using an environment file.
 
 1. Rename `.env_template` to `.env` in the project's root directory.
-2. Edit the contents of your new `.env` file and adjust the values as needed.
-
-**Notice:** If you haven't already logged in using `huggingface-cli login`, you must set `HUGGING_FACE_HUB_TOKEN` in your `.env` file with a token generated in your Hugging Face account settings. This is required to download gated models from Hugging Face.
+2. Edit the contents of your new `.env` file and set your `FAL_KEY` and desired `FAL_APPLICATION`.
 
 ## How to Run<a name="how-to-run"></a>
 
@@ -234,4 +228,4 @@ For more details, see the [LICENSE](./LICENSE) file or visit:
 
 Open issues on GitHub for bugs, help, or feature requests.
 
-**Enjoy creating stunning images with your private AI!**
+**Enjoy creating stunning images powered by fal.ai!**

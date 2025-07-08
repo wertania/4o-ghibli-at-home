@@ -18,12 +18,14 @@ from collections import deque
 from contextlib import suppress
 from typing import Any
 
-import torch
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from loguru import logger
 from PIL import Image, UnidentifiedImageError
+import fal_client
+import httpx
+import base64
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # --- Dotenv Configuration ---
@@ -81,8 +83,8 @@ class Config:
     CLEANUP_INTERVAL = int(os.getenv("CLEANUP_INTERVAL", 300))  # 5 minutes
     # Folder to store generated images
     RESULTS_FOLDER = os.getenv("RESULTS_FOLDER", "generated_images")
-    # HF Token
-    HF_TOKEN = os.getenv("HUGGING_FACE_HUB_TOKEN", None)
+    # fal.ai application name
+    FAL_APPLICATION = os.getenv("FAL_APPLICATION", "fal-ai/fast-sdxl")
     # Default generation parameters
     DEFAULT_WIDTH = 1024
     DEFAULT_HEIGHT = 1024
@@ -91,72 +93,13 @@ class Config:
     DEFAULT_TRUE_CFG_SCALE = 1.0
 
 
-# --- Model Initialization ---
-# This is a blocking, long-running operation, so it's done once at startup.
-logger.info("Initializing model... This may take a few minutes.")
-pipe = None
+# --- Remote API Setup ---
+logger.info("Using fal.ai for image generation; no local model will be loaded.")
 try:
-    # Use environment variable for device, with auto-detection as fallback
-    _default_device = "cuda" if torch.cuda.is_available() else "cpu"
-    DEVICE = os.getenv("PYTORCH_DEVICE", _default_device)
-    TORCH_DTYPE = (
-        torch.bfloat16 if DEVICE == "cuda" else torch.float32
-    )  # bfloat16 not supported on CPU for all ops
-
-    if not torch.cuda.is_available():
-        logger.warning(
-            "CUDA not available. Running on CPU, which will be extremely slow."
-        )
-
-    from dfloat11 import DFloat11Model
-    from diffusers import FluxKontextPipeline
-
-    if Config.HF_TOKEN:
-        pipe = FluxKontextPipeline.from_pretrained(
-            "black-forest-labs/FLUX.1-Kontext-dev",
-            torch_dtype=TORCH_DTYPE,
-            token=Config.HF_TOKEN,
-        )
-        DFloat11Model.from_pretrained(
-            "DFloat11/FLUX.1-Kontext-dev-DF11",
-            device="cpu",  # DFloat11 specific, may need CPU
-            bfloat16_model=pipe.transformer,
-            token=Config.HF_TOKEN,
-        )
-    else:
-        pipe = FluxKontextPipeline.from_pretrained(
-            "black-forest-labs/FLUX.1-Kontext-dev",
-            torch_dtype=TORCH_DTYPE,
-        )
-        DFloat11Model.from_pretrained(
-            "DFloat11/FLUX.1-Kontext-dev-DF11",
-            device="cpu",  # DFloat11 specific, may need CPU
-            bfloat16_model=pipe.transformer,
-        )
-
-    if DEVICE == "cuda":
-        # Offloading is essential for consumer GPUs with limited VRAM
-        pipe.enable_model_cpu_offload()
-    else:
-        pipe.to(DEVICE)
-
-    logger.info(f"Model initialized successfully on device '{DEVICE}'.")
-
-    # --- Create results directory ---
-    try:
-        os.makedirs(Config.RESULTS_FOLDER, exist_ok=True)
-        logger.info(f"Results will be saved in '{Config.RESULTS_FOLDER}' directory.")
-    except OSError as e:
-        logger.critical(f"Could not create results directory. Error: {e}")
-        exit(1)
-
-except ImportError as e:
-    logger.critical(f"A required library is not installed. {e}")
-    exit(1)
-except Exception as e:
-    # This could be a huggingface connection error, file not found, etc.
-    logger.critical(f"Could not initialize the model. Error: {e}")
-    # The app is not functional without the model, so we exit.
+    os.makedirs(Config.RESULTS_FOLDER, exist_ok=True)
+    logger.info(f"Results will be saved in '{Config.RESULTS_FOLDER}' directory.")
+except OSError as e:
+    logger.critical(f"Could not create results directory. Error: {e}")
     exit(1)
 
 
@@ -246,8 +189,9 @@ def parse_request_args(form_data, image_file):
     if seed_str and seed_str.isdigit():
         seed = int(seed_str)
     else:
-        seed = torch.randint(0, 2**32 - 1, (1,)).item()
-    args["generator"] = torch.Generator(device=DEVICE).manual_seed(seed)
+        import random
+
+        seed = random.randint(0, 2**32 - 1)
     args["seed_value"] = seed  # Store the actual seed used for status reporting
 
     return args
@@ -311,21 +255,31 @@ def image_generation_worker():
 
         if job_id:
             pipe_kwargs = job_results[job_id]["params"]
-            log_params = {
-                k: v for k, v in pipe_kwargs.items() if k not in ["image", "generator"]
-            }
-            log_params["seed"] = job_results[job_id]["params"]["seed_value"]
+            log_params = {k: v for k, v in pipe_kwargs.items() if k != "image"}
             logger.info(f"Processing job {job_id} with params: {log_params}")
-            pipe_kwargs.pop("seed_value")
 
             try:
-                # --- Run the Image Processing Pipeline ---
-                processed_image = pipe(**pipe_kwargs).images[0]
+                encoded_image = fal_client.encode_image(pipe_kwargs.pop("image"))
+                payload = pipe_kwargs
+                payload["image"] = encoded_image
+                result = fal_client.run(Config.FAL_APPLICATION, payload)
 
-                # Save the image to a file on disk
+                if "image_url" in result:
+                    resp = httpx.get(result["image_url"])
+                    resp.raise_for_status()
+                    image_bytes = resp.content
+                else:
+                    data = result.get("image")
+                    if not data:
+                        raise ValueError("fal.ai response did not contain an image")
+                    if data.startswith("data:"):
+                        data = data.split(",", 1)[1]
+                    image_bytes = base64.b64decode(data)
+
                 result_filename = f"{job_id}.png"
                 result_path = os.path.join(Config.RESULTS_FOLDER, result_filename)
-                processed_image.save(result_path, "PNG")
+                with open(result_path, "wb") as f:
+                    f.write(image_bytes)
 
                 # Store result and update status
                 with queue_lock:
@@ -338,43 +292,18 @@ def image_generation_worker():
                     )
                 logger.info(f"Job {job_id} completed successfully.")
 
-            except torch.cuda.OutOfMemoryError as e:
-                error_message = "Processing failed due to insufficient GPU memory. Try a smaller image size or reduce batch size."
-                logger.error(f"Job {job_id} failed: {error_message} - {e}")
-                with queue_lock:
-                    job_results[job_id].update(
-                        {"status": "failed", "error": error_message}
-                    )
-            except RuntimeError as e:
-                # Catch other generic PyTorch/CUDA runtime errors
-                error_message = (
-                    f"A runtime error occurred during processing. Details: {e}"
-                )
-                logger.error(f"Job {job_id} failed: {error_message}")
-                with queue_lock:
-                    job_results[job_id].update(
-                        {
-                            "status": "failed",
-                            "error": "An unexpected error occurred. This may be a resource issue.",
-                        }
-                    )
             except Exception as e:
-                # Catch any other unexpected errors
                 logger.exception(
-                    f"An unexpected error occurred in worker for job {job_id}: {e}"
+                    f"An error occurred in worker for job {job_id}: {e}"
                 )
                 with queue_lock:
                     job_results[job_id].update(
-                        {
-                            "status": "failed",
-                            "error": "An unexpected server error occurred.",
-                        }
+                        {"status": "failed", "error": str(e)}
                     )
             finally:
                 # Clean up large objects from the results dict to free memory
                 if "params" in job_results.get(job_id, {}):
                     del job_results[job_id]["params"]["image"]
-                    del job_results[job_id]["params"]["generator"]
 
         # Sleep to prevent busy-waiting when the queue is empty
         time.sleep(0.1)
